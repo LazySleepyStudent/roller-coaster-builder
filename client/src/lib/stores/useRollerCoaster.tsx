@@ -228,49 +228,48 @@ export const useRollerCoaster = create<RollerCoasterState>((set, get) => ({
       const entryPoint = state.trackPoints[pointIndex];
       const entryPos = entryPoint.position.clone();
       
-      // Build a temporary spline to get the TRUE tangent at the entry point
-      // This ensures the loop follows the track's actual direction
-      const points = state.trackPoints.map((p) => p.position.clone());
-      const tempCurve = new THREE.CatmullRomCurve3(points, false, "catmullrom", 0.5);
-      
-      // Get parameter t for this point
-      const t = pointIndex / (state.trackPoints.length - 1);
-      
-      // Sample TRUE tangent from the spline (includes curvature direction)
-      let forward = tempCurve.getTangent(t).normalize();
-      
-      // Make forward horizontal for vertical loop (project to XZ and renormalize)
-      const horizontalForward = new THREE.Vector3(forward.x, 0, forward.z);
-      if (horizontalForward.length() > 0.01) {
-        forward = horizontalForward.normalize();
+      // Calculate forward direction from neighboring points (simple and reliable)
+      let forward = new THREE.Vector3(1, 0, 0);
+      if (pointIndex > 0) {
+        const prevPoint = state.trackPoints[pointIndex - 1];
+        forward = entryPos.clone().sub(prevPoint.position);
+        forward.y = 0;  // Keep loop vertical
+        if (forward.length() < 0.1) {
+          forward = new THREE.Vector3(1, 0, 0);
+        }
+        forward.normalize();
       }
       
       const loopRadius = 5;
-      const totalLoopPoints = 32;  // More points for smoother spline
+      // Use fewer loop points - CatmullRom will smooth them
+      const totalLoopPoints = 16;
       const loopPoints: TrackPoint[] = [];
       
       // World up for vertical loop
       const up = new THREE.Vector3(0, 1, 0);
-      // Right vector perpendicular to forward and up
       const right = new THREE.Vector3().crossVectors(forward, up).normalize();
       
-      // NO helical offset - pure vertical loop for cleaner geometry
+      // Small helical offset to prevent entry/exit overlap
+      const helixSeparation = 1.5;
       
-      // Build the pure vertical loop
+      // Build the loop with slight helical offset
       for (let i = 0; i <= totalLoopPoints; i++) {
-        const loopT = i / totalLoopPoints; // 0 to 1
-        const theta = loopT * Math.PI * 2; // 0 to 2π
+        const loopT = i / totalLoopPoints;
+        const theta = loopT * Math.PI * 2;
         
-        // Pure vertical loop: position = entry + sin(θ)*forward*R + (1-cos(θ))*up*R
         const forwardOffset = Math.sin(theta) * loopRadius;
         const verticalOffset = (1 - Math.cos(theta)) * loopRadius;
+        
+        // Smoothstep lateral offset
+        const smoothT = loopT * loopT * (3 - 2 * loopT);
+        const lateralOffset = smoothT * helixSeparation;
         
         loopPoints.push({
           id: `point-${++pointCounter}`,
           position: new THREE.Vector3(
-            entryPos.x + forward.x * forwardOffset,
+            entryPos.x + forward.x * forwardOffset + right.x * lateralOffset,
             entryPos.y + verticalOffset,
-            entryPos.z + forward.z * forwardOffset
+            entryPos.z + forward.z * forwardOffset + right.z * lateralOffset
           ),
           tilt: 0,
           loopMeta: {
@@ -284,33 +283,45 @@ export const useRollerCoaster = create<RollerCoasterState>((set, get) => ({
         });
       }
       
-      // Loop exit position (same as entry for pure vertical loop)
       const loopExitPos = loopPoints[loopPoints.length - 1].position.clone();
       
-      // Departure points - continue straight in the forward direction
+      // Calculate exit direction toward next point if available
+      const nextOriginalPoint = state.trackPoints[pointIndex + 1];
+      let exitDir = forward.clone();
+      if (nextOriginalPoint) {
+        const toNext = nextOriginalPoint.position.clone().sub(loopExitPos);
+        toNext.y = 0;
+        if (toNext.length() > 0.1) {
+          exitDir = toNext.normalize();
+        }
+      }
+      
+      // Departure points aligned with exit direction, gradually reducing lateral offset
       const departureDist = 4;
       const departurePoints: TrackPoint[] = [];
       
-      // Add 2 departure guide points to ensure smooth exit
-      for (let i = 1; i <= 2; i++) {
+      for (let i = 1; i <= 3; i++) {
+        const t = i / 3;
+        const remainingOffset = helixSeparation * (1 - t);
+        
         departurePoints.push({
           id: `point-${++pointCounter}`,
           position: new THREE.Vector3(
-            loopExitPos.x + forward.x * departureDist * i,
+            loopExitPos.x + exitDir.x * departureDist * i + right.x * remainingOffset,
             loopExitPos.y,
-            loopExitPos.z + forward.z * departureDist * i
+            loopExitPos.z + exitDir.z * departureDist * i + right.z * remainingOffset
           ),
           tilt: 0
         });
       }
       
-      // Combine: replace the entry point with loop + departure
-      // Don't add approach points - the existing track provides the approach
+      // Keep the entry point as-is (provides natural spline approach)
+      // Insert loop after entry point
       const newTrackPoints = [
-        ...state.trackPoints.slice(0, pointIndex),  // Points before entry (provide natural approach)
-        ...loopPoints,
+        ...state.trackPoints.slice(0, pointIndex + 1),  // Include entry point
+        ...loopPoints.slice(1),  // Skip first loop point (same as entry)
         ...departurePoints,
-        ...state.trackPoints.slice(pointIndex + 1)  // Points after entry
+        ...state.trackPoints.slice(pointIndex + 1)
       ];
       
       return { trackPoints: newTrackPoints };
